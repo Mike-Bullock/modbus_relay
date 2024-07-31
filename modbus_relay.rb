@@ -1,15 +1,23 @@
+#!/usr/bin/env ruby
 # https://www.waveshare.com/wiki/Modbus_POE_ETH_Relay
-require 'digest/crc32'
+#
+# Send commands between containers using pipes
+# https://community.home-assistant.io/t/running-commands-on-the-host-without-ssh/510481
+# need to chmod a+wr for the fifo pipe after creation
+#
+#
+# mkdir /usr/share/hassio/homeassistant/pipes
+# sudo mkfifo /usr/share/hassio/homeassistant/pipes/host_executor_queue
+# chmod a+wr /usr/share/hassio/homeassistant/pipes/host_executor_queue
+
 require 'digest/crc16_modbus'
 require 'socket'
-
-@sock = TCPSocket.new("192.168.200.195", 4196)
+require 'fileutils'
 
 def send_message(message)
   # message is array of bytes [0x01, 0x02, etc.]
   sendbuff = message.dup
   crc = Digest::CRC16Modbus.new
-
 
   crc.update(message.pack('C*'))
   crc_int = crc.hexdigest.to_i(16) # get integer value of CRC
@@ -91,8 +99,23 @@ end
 
 #send_message(sendbuff)
 #get_sw_version()
-toggle_relay(0xFF, RELAY_FLIP)
+#
+PIPE_DIRECTORY = "/usr/share/hassio/homeassistant/pipes"
+PIPE_NAME = PIPE_DIRECTORY + "/host_executor_queue"
+
+# Recreate pipes if not exist
+FileUtils.mkdir_p(PIPE_DIRECTORY) if !File.directory?(PIPE_DIRECTORY)
+
+# recreate pipe
+File.delete(PIPE_NAME) if File.exists?(PIPE_NAME)
+File.mkfifo(PIPE_NAME)
+FileUtils.chmod("a+rw", PIPE_NAME)
 
 
-
-@sock.close
+pipe = File.open(PIPE_NAME, "r+") 
+while true
+  puts pipe.gets  #I expect this to block and wait for input
+  @sock = TCPSocket.new("192.168.200.195", 4196)
+  toggle_relay(0xFF, RELAY_FLIP)
+  @sock.close
+end
