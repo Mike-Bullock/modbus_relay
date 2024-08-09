@@ -9,6 +9,18 @@ require 'digest/crc16_modbus'
 require 'socket'
 require 'fileutils'
 require 'daemons'
+require 'logger'
+
+PIPE_DIRECTORY = "/usr/share/hassio/homeassistant/pipes"
+PIPE_NAME = PIPE_DIRECTORY + "/host_executor_queue"
+RUN_MODE_DAEMON   = 0
+RUN_MODE_CONSOLE  = 1
+
+PS_NAME = $0.match('([\w\_\.]+)\Z')[0] # name the daemon based on the this file's name
+PID_FILE = "/tmp/#{PS_NAME}.pid"
+LOG_FILE = "/var/log/#{PS_NAME}.log"
+
+@logger = Logger.new(STDOUT)
 
 def send_message(message, read_timeout_ms = 500)
   # message is array of bytes [0x01, 0x02, etc.]
@@ -134,26 +146,65 @@ def find_relay_ip(timeout_ms = 500)
       # also a lot of guesswork. 8888888888 was in my packet capture. 
 
       device_id = recv_data[0].force_encoding("iso-8859-1").split("8888888888")[1][0,6].unpack('H*').first
-      puts "device id: #{device_id}"
+      @logger.info("device id: #{device_id}")
     end
     return recv_data[1][2]
   end
 end
-###############################################################################
 
-PIPE_DIRECTORY = "/usr/share/hassio/homeassistant/pipes"
-PIPE_NAME = PIPE_DIRECTORY + "/host_executor_queue"
-RUN_MODE_DAEMON   = 0
-RUN_MODE_CONSOLE  = 1
-# name the daemon based on the this file's name
-PS_NAME = $0.match('([\w\_\.]+)\Z')[0]
-PID_FILE = "/tmp/#{PS_NAME}.pid"
-LOG_FILE = "/var/log/#{PS_NAME}.log"
+def register_service
+
+  exec_start = Dir.getwd + "/" + $0.gsub(/^\./, "").gsub(/^\//, "")
+  working_directory = File.dirname(exec_start)
+
+  service_name = File.basename(exec_start)
+  service_file_name = "#{service_name}.service"
+
+  service_file_data =<<EOF
+[Unit]
+Description=Modbus Relay
+
+[Service]
+Type=forking
+PIDFile=#{PID_FILE}
+Restart=on-failure
+RestartSec=2
+WorkingDirectory=#{working_directory}
+# Restart=always
+ExecStart=#{exec_start}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+File.write("/lib/systemd/system/#{service_file_name}", service_file_data)
+
+  # copy to /lib/systemd/system
+  # Enable Service
+#echo "enabling piglet service....."
+#systemctl enable piglet.service
+
+# Start Service
+#echo "starting piglet service....."
+#systemctl start piglet
+
+#     systemctl status pifi
+#     systemctl start pifi
+#     systemctl stop pifi
+#     systemctl restart pifi
+
+
+
+end
+
+###############################################################################
+#register_service
+#exit
 
 run_mode = RUN_MODE_DAEMON
 if ARGV.map(&:upcase).include?("CONSOLE")
   run_mode = RUN_MODE_CONSOLE
-  puts "Running in console"
+  @logger.info("Starting Modbus Relay in console mode")
 end
 
 
@@ -165,10 +216,10 @@ if File.exist?(PID_FILE)
 
   if $?.exitstatus == 0
     if run_mode == RUN_MODE_CONSOLE
-      puts "Killing existing running pid #{running_pid}"
+      @logger.info("Killing existing running pid #{running_pid}")
       `kill -9 #{running_pid}`
     else
-      $stderr.puts "a #{PS_NAME} process is already running with pid #{running_pid}"
+      @logger.warn("a #{PS_NAME} process is already running with pid #{running_pid}")
       exit 1
     end
   else # pid file exists, but process is dead
@@ -178,6 +229,7 @@ end
 
 unless run_mode == RUN_MODE_CONSOLE
   Daemonize.daemonize(LOG_FILE, PS_NAME)
+  @logger.info("Starting Modbus Relay in daemon mode")
 end
 
 # write the daemon's pid file
@@ -186,11 +238,12 @@ File.open(PID_FILE, 'w') do |f|
 end
 
 
-
 relay_ip = find_relay_ip()
-puts "Relay board IP: #{relay_ip}"
-
-
+if relay_ip
+  @logger.info("Found relay board: #{relay_ip}")
+else
+  @logger.error("Could not find relay board on network")
+end
 
 # Recreate pipes if not exist
 FileUtils.mkdir_p(PIPE_DIRECTORY) if !File.directory?(PIPE_DIRECTORY)
@@ -202,21 +255,36 @@ FileUtils.chmod("a+rw", PIPE_NAME)
 
 pipe = File.open(PIPE_NAME, "r+") 
 while true
-  FileUtils.touch(PID_FILE)
-  puts pipe.gets  #I expect this to block and wait for input
 
-  relay_ip = find_relay_ip()
-  if !relay_ip
-    puts "unable to find relay board"
-    next
-  end
-  puts "Relay board IP: #{relay_ip}"
-
+  begin
+    sleep(0.01)  
+    FileUtils.touch(PID_FILE)
   
-  @sock = TCPSocket.new(relay_ip, 4196)
-  #toggle_relay(0xFF, RELAY_FLIP)
-  pulse_relay(0, 500)
-  @sock.close
+    # https://stackoverflow.com/questions/26794752/ruby-character-wise-io-select
+    if (rd,_,_ = IO.select([pipe, $stdin], [], [], 0))
+      rd = rd[0]
+      # use IO.select to make gets non blocking
+      pipe_data = rd.gets()&.strip
+      @logger.info("Received on pipe: #{pipe_data}")
+
+      relay_ip = find_relay_ip()
+      if !relay_ip
+        puts "unable to find relay board"
+        next
+      end
+      puts "Relay board IP: #{relay_ip}"
+      
+      @sock = TCPSocket.new(relay_ip, 4196)
+      pulse_relay(0, 500) # pulse first relay ON for 500 ms
+      @sock.close
+    end
+  rescue SystemExit, Interrupt
+    @logger.info("Exiting")
+    break
+  rescue => e
+    @logger.error("Exception #{e.message} ")
+    @logger.error("Backtrace:\n#{e.backtrace.join("\n\t")} ")
+  end
 end
 
 File.delete(PID_FILE) if File.exist?(PID_FILE)
