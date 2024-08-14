@@ -5,6 +5,16 @@
 # https://community.home-assistant.io/t/running-commands-on-the-host-without-ssh/510481
 # need to chmod a+wr for the fifo pipe after creation
 #
+#
+#
+# In Home Assistant
+# Add the following to configuration.yaml
+# shell_command:
+#  some_command: echo some_script > /config/pipes/host_executor_queue
+#
+# gem install daemons
+#
+#
 require 'digest/crc16_modbus'
 require 'socket'
 require 'fileutils'
@@ -20,6 +30,18 @@ PS_NAME = $0.match('([\w\_\.]+)\Z')[0] # name the daemon based on the this file'
 PID_FILE = "/tmp/#{PS_NAME}.pid"
 LOG_FILE = "/var/log/#{PS_NAME}.log"
 
+RELAY_CH1 = 0
+RELAY_CH2 = 1
+RELAY_CH3 = 2
+RELAY_CH4 = 3
+RELAY_CH5 = 4
+RELAY_CH6 = 5
+RELAY_CH7 = 6
+RELAY_CH8 = 7
+RELAY_CH_ALL = 0xFF
+RELAY_BOARD_DISCOVER_UDP_PORT = 1092
+RELAY_BOARD_MODBUS_TCP_PORT = 4196
+
 @logger = Logger.new(STDOUT)
 
 def send_message(message, read_timeout_ms = 500)
@@ -34,7 +56,7 @@ def send_message(message, read_timeout_ms = 500)
   sendbuff << (crc_int & 0x00FF)
   sendbuff << ((crc_int >> 8) & 0x00FF)
 
-  puts "sending=" + sendbuff.inspect
+  #puts "sending=" + sendbuff.inspect
 
   # encode and send via tcp
   @sock.write(sendbuff.pack('C*'))
@@ -45,7 +67,7 @@ def send_message(message, read_timeout_ms = 500)
   loop do
     if (Time.now - start_time)*1000.0 > read_timeout_ms
       # timeout after read_timeout_ms
-      puts "timeout"
+      @logger.warn("Timeout waiting for response")
       return nil
     end
     if !@sock.ready?
@@ -63,7 +85,7 @@ def send_message(message, read_timeout_ms = 500)
     
     # the only way we know we have a full response is when the crc passes.
     if crc.hexdigest.to_i(16) == 0
-      puts "Received valid response"
+      #puts "Received valid response"
       return readbuff
     end
   end
@@ -118,47 +140,63 @@ def get_sw_version
 
 end
 
-def find_relay_ip(timeout_ms = 500)
+# TODO implement searching for device id
+def find_relay_ip(device_id: nil, timeout_ms: 500)
   # there is a UDP broadcast to port 1092 to find relays on the network. 
   discover_msg = "ZL\000\000\344D\312\000\310\fMu\330\fMuU|\350+\244Cu\004\310\fMu\330\fMu\360\350\031\000\324\243?u\333\243?u\265\257\253I\000\351\031\000\324\243?u\333\243?uE\256\253I@\000\000\000\b\000\000\000h\351\031\000)\201@u\310\fMu\330\350\031\000\364\352\031\000)\201@u\377\377\377\377\333\243?u.\243?u\340@\312\000h\351\031\000\330\fMuTCu\004\030\353Lu\340@\312\000\b\000\000\000\v\000\000\000h\351\031\000P\351\031\000\302\244?u\330\fMuh\351\031\000&R\312\000\345\220?urN"
   sock = UDPSocket.new
   sock.setsockopt(Socket::SOL_SOCKET, Socket::SO_BROADCAST, 1)
-  sock.send(discover_msg, 0, "255.255.255.255",1092)
+  sock.send(discover_msg, 0, "255.255.255.255",RELAY_BOARD_DISCOVER_UDP_PORT)
   
   start_time = Time.now
   loop do
     if (Time.now - start_time)*1000.0 > timeout_ms
       # timeout after read_timeout_ms
       sock.close
-      return nil
+      return nil, nil
     end
+
     if !sock.ready?
       # sleep 10ms is no data on socket.
       sleep 0.01
       next
     end
+
     recv_data = sock.recvfrom(1024)
-    sock.close
-
-    begin
+    
+    remote_ip = recv_data[1][2] # return IP address from recvfrom
+    data_device_id = begin
       # find device ID
-      # there is a lot of improvement to be made here for error checking....
-      # also a lot of guesswork. 8888888888 was in my packet capture. 
+      # there is a lot of improvement to be made here for error checking....that's why in rescue block
+      # also a lot of guesswork. 8888888888 was in my packet capture as the delimiter before the 
+      # device id (6 bytes, looks like MAC, similar to MAC, but isn't the MAC)
+      # Only returns single device ID. work beeds to be done to if multiple relays exist
+      # on network
 
-      device_id = recv_data[0].force_encoding("iso-8859-1").split("8888888888")[1][0,6].unpack('H*').first
-      @logger.info("device id: #{device_id}")
+      recv_data[0].force_encoding("iso-8859-1").split("8888888888")[1][0,6]&.unpack('H*')&.first&.upcase
+    rescue => e
+      nil
     end
-    return recv_data[1][2]
+
+    sock.close
+    return remote_ip, data_device_id
   end
 end
 
-def register_service
+SERVICE_INSTALL = 0
+SERVICE_REMOVE  = 1
+SERVICE_START   = 2
+SERVICE_STOP    = 3
 
-  exec_start = Dir.getwd + "/" + $0.gsub(/^\./, "").gsub(/^\//, "")
+def manage_service(operation)
+
+  # exec_start is full path of current executable, regardless of where it is invoked from
+  exec_start = Dir.getwd + "/" + $0.gsub(/^\./, "").gsub(/^\//, "") # remove leading periods and slashes.
   working_directory = File.dirname(exec_start)
 
-  service_name = File.basename(exec_start)
+  service_name = File.basename(exec_start) # executable name without path
   service_file_name = "#{service_name}.service"
+  service_file_path = "/lib/systemd/system/#{service_file_name}"
 
   service_file_data =<<EOF
 [Unit]
@@ -170,39 +208,35 @@ PIDFile=#{PID_FILE}
 Restart=on-failure
 RestartSec=2
 WorkingDirectory=#{working_directory}
-# Restart=always
 ExecStart=#{exec_start}
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-File.write("/lib/systemd/system/#{service_file_name}", service_file_data)
-
-  # copy to /lib/systemd/system
-  # Enable Service
-#echo "enabling piglet service....."
-#systemctl enable piglet.service
-
-# Start Service
-#echo "starting piglet service....."
-#systemctl start piglet
-
-#     systemctl status pifi
-#     systemctl start pifi
-#     systemctl stop pifi
-#     systemctl restart pifi
-
-
-
+  if operation == SERVICE_INSTALL 
+    File.write(service_file_path, service_file_data) # copy to /lib/systemd/system
+    `systemctl enable #{service_file_name}` # Enable Service
+  elsif operation == SERVICE_REMOVE
+    `systemctl disable #{service_file_name}`
+    File.delete(service_file_path)
+  elsif operation == SERVICE_START
+    `systemctl start #{service_file_name}`
+  elsif operation == SERVICE_STOP
+    `systemctl stop #{service_file_name}`
+  end
 end
 
 ###############################################################################
-#register_service
-#exit
+# Main Program
+###############################################################################
 
 run_mode = RUN_MODE_DAEMON
-if ARGV.map(&:upcase).include?("CONSOLE")
+if ARGV.map(&:upcase).include?("INSTALL")
+  puts "Installing service"
+  manage_service(SERVICE_INSTALL)
+  exit 0
+elsif ARGV.map(&:upcase).include?("CONSOLE")
   run_mode = RUN_MODE_CONSOLE
   @logger.info("Starting Modbus Relay in console mode")
 end
@@ -237,10 +271,10 @@ File.open(PID_FILE, 'w') do |f|
   f.write("#{$$}\n")
 end
 
-
-relay_ip = find_relay_ip()
+# Not needed not, but see if relay board is on the network
+relay_ip, device_id = find_relay_ip()
 if relay_ip
-  @logger.info("Found relay board: #{relay_ip}")
+  @logger.info("Found relay board #{device_id}: #{relay_ip}")
 else
   @logger.error("Could not find relay board on network")
 end
@@ -254,28 +288,39 @@ File.mkfifo(PIPE_NAME)
 FileUtils.chmod("a+rw", PIPE_NAME)
 
 pipe = File.open(PIPE_NAME, "r+") 
-while true
+while true # main loop
+  sleep(0.01)  
 
-  begin
-    sleep(0.01)  
+  begin # rescue loop withim main loop
     FileUtils.touch(PID_FILE)
   
     # https://stackoverflow.com/questions/26794752/ruby-character-wise-io-select
-    if (rd,_,_ = IO.select([pipe, $stdin], [], [], 0))
+    read_fds = [pipe]
+    read_fds << $stdin if run_mode == RUN_MODE_CONSOLE
+
+
+    # Check if pipes have any data
+    if (rd,_,_ = IO.select(read_fds, [], [], 0))  # use IO.select to make gets non blocking gets
+      # return immediately if nothign to read
       rd = rd[0]
-      # use IO.select to make gets non blocking
+      
       pipe_data = rd.gets()&.strip
+      next if pipe_data.empty?
       @logger.info("Received on pipe: #{pipe_data}")
 
-      relay_ip = find_relay_ip()
+      relay_ip,_ = find_relay_ip()
       if !relay_ip
         puts "unable to find relay board"
         next
       end
-      puts "Relay board IP: #{relay_ip}"
+      @logger.info("Relay board IP: #{relay_ip}")
       
-      @sock = TCPSocket.new(relay_ip, 4196)
-      pulse_relay(0, 500) # pulse first relay ON for 500 ms
+      # todo socket connect timeout
+      @sock = TCPSocket.new(relay_ip, RELAY_BOARD_MODBUS_TCP_PORT) 
+      # todo if socket can't be established
+      # determine what to do based on pipe data
+
+      pulse_relay(RELAY_CH1, 500) # pulse first relay ON for 500 ms
       @sock.close
     end
   rescue SystemExit, Interrupt
@@ -284,6 +329,7 @@ while true
   rescue => e
     @logger.error("Exception #{e.message} ")
     @logger.error("Backtrace:\n#{e.backtrace.join("\n\t")} ")
+    sleep(5) # backoff for 5 seconds while restarting loop. 
   end
 end
 
