@@ -56,7 +56,7 @@ def send_message(message, read_timeout_ms = 500)
   sendbuff << (crc_int & 0x00FF)
   sendbuff << ((crc_int >> 8) & 0x00FF)
 
-  #puts "sending=" + sendbuff.inspect
+  @logger.debug("Sending bytes:  " + sendbuff.map { |n| '0x%02X' % n }.join(" "))
 
   # encode and send via tcp
   @sock.write(sendbuff.pack('C*'))
@@ -85,7 +85,7 @@ def send_message(message, read_timeout_ms = 500)
     
     # the only way we know we have a full response is when the crc passes.
     if crc.hexdigest.to_i(16) == 0
-      #puts "Received valid response"
+      @logger.debug("Received bytes: " + readbuff.map { |n| '0x%02X' % n }.join(" "))      
       return readbuff
     end
   end
@@ -120,6 +120,8 @@ def pulse_relay(relay_idx, on_ms)
   pulse_ticks = pulse_ms / 100
   pulse_time_hex = pulse_ticks.to_s.to_i(16)
 
+  @logger.debug("Pulsing relay #{relay_idx == RELAY_CH_ALL ? 'all' : relay_idx +1} for #{pulse_ms}ms.")
+
   sendbuff =  [0x01,
                0x05, 
                0x02,
@@ -143,6 +145,8 @@ end
 # TODO implement searching for device id
 def find_relay_ip(device_id: nil, timeout_ms: 500)
   # there is a UDP broadcast to port 1092 to find relays on the network. 
+  # this discover message was found using a packet capture when the Vircom utility
+  # is started. 
   discover_msg = "ZL\000\000\344D\312\000\310\fMu\330\fMuU|\350+\244Cu\004\310\fMu\330\fMu\360\350\031\000\324\243?u\333\243?u\265\257\253I\000\351\031\000\324\243?u\333\243?uE\256\253I@\000\000\000\b\000\000\000h\351\031\000)\201@u\310\fMu\330\350\031\000\364\352\031\000)\201@u\377\377\377\377\333\243?u.\243?u\340@\312\000h\351\031\000\330\fMuTCu\004\030\353Lu\340@\312\000\b\000\000\000\v\000\000\000h\351\031\000P\351\031\000\302\244?u\330\fMuh\351\031\000&R\312\000\345\220?urN"
   sock = UDPSocket.new
   sock.setsockopt(Socket::SOL_SOCKET, Socket::SO_BROADCAST, 1)
@@ -157,7 +161,7 @@ def find_relay_ip(device_id: nil, timeout_ms: 500)
     end
 
     if !sock.ready?
-      # sleep 10ms is no data on socket.
+      # sleep 10ms if no data on socket.
       sleep 0.01
       next
     end
@@ -182,11 +186,6 @@ def find_relay_ip(device_id: nil, timeout_ms: 500)
     return remote_ip, data_device_id
   end
 end
-
-SERVICE_INSTALL = 0
-SERVICE_REMOVE  = 1
-SERVICE_START   = 2
-SERVICE_STOP    = 3
 
 def manage_service(operation)
 
@@ -214,16 +213,18 @@ ExecStart=#{exec_start}
 WantedBy=multi-user.target
 EOF
 
-  if operation == SERVICE_INSTALL 
+  if operation =~ /install/i
     File.write(service_file_path, service_file_data) # copy to /lib/systemd/system
     `systemctl enable #{service_file_name}` # Enable Service
-  elsif operation == SERVICE_REMOVE
+  elsif operation =~ /remove/i
     `systemctl disable #{service_file_name}`
     File.delete(service_file_path)
-  elsif operation == SERVICE_START
+  elsif operation =~ /start/i
     `systemctl start #{service_file_name}`
-  elsif operation == SERVICE_STOP
+  elsif operation =~ /stop/i
     `systemctl stop #{service_file_name}`
+  else
+    puts "Unknown service operation #{operation}"
   end
 end
 
@@ -232,15 +233,37 @@ end
 ###############################################################################
 
 run_mode = RUN_MODE_DAEMON
-if ARGV.map(&:upcase).include?("INSTALL")
-  puts "Installing service"
-  manage_service(SERVICE_INSTALL)
+
+if ARGV.length == 0
+  # daemon mode
+elsif ARGV.length > 1 || ARGV[0]  =~ /\?|help/i
+  help =<<EOF
+  /? or help          This help menu
+  console             run program in console (non daemonized) mode
+  install             install service
+  remove              remove service
+  start               start service
+  stop                stop service
+  kill                kill running daemon
+  <no args>           run in daemon/background mode
+EOF
+  puts help + "\n\n"
   exit 0
-elsif ARGV.map(&:upcase).include?("CONSOLE")
+elsif ARGV[0] =~ /^(install|remove|start|stop)$/i
+  # service oriented operation
+  manage_service($1)
+  exit 0
+elsif ARGV[0] =~ /^console$/i
   run_mode = RUN_MODE_CONSOLE
   @logger.info("Starting Modbus Relay in console mode")
+elsif ARGV[0] =~ /^kill$/i
+  running_pid = File.read(PID_FILE).strip
+  puts "Killing #{running_pid}"
+  `kill -9 #{running_pid}`
+  exit
+else
+  puts "Unknown argument: '#{ARGV[0]}'"
 end
-
 
 if File.exist?(PID_FILE)
   running_pid = File.read(PID_FILE).strip
@@ -270,6 +293,7 @@ end
 File.open(PID_FILE, 'w') do |f|
   f.write("#{$$}\n")
 end
+FileUtils.chmod("a+rw", PID_FILE)
 
 # Not needed not, but see if relay board is on the network
 relay_ip, device_id = find_relay_ip()
@@ -281,6 +305,7 @@ end
 
 # Recreate pipes if not exist
 FileUtils.mkdir_p(PIPE_DIRECTORY) if !File.directory?(PIPE_DIRECTORY)
+FileUtils.chmod("a+wx", PIPE_DIRECTORY) 
 
 # recreate pipe
 File.delete(PIPE_NAME) if File.exists?(PIPE_NAME)
@@ -289,38 +314,41 @@ FileUtils.chmod("a+rw", PIPE_NAME)
 
 pipe = File.open(PIPE_NAME, "r+") 
 while true # main loop
-  sleep(0.01)  
+  sleep(0.01)  # 10ms sleep
 
   begin # rescue loop withim main loop
     FileUtils.touch(PID_FILE)
   
     # https://stackoverflow.com/questions/26794752/ruby-character-wise-io-select
-    read_fds = [pipe]
+    read_fds = [ pipe ]
     read_fds << $stdin if run_mode == RUN_MODE_CONSOLE
-
 
     # Check if pipes have any data
     if (rd,_,_ = IO.select(read_fds, [], [], 0))  # use IO.select to make gets non blocking gets
-      # return immediately if nothign to read
+      # return immediately if nothing to read
       rd = rd[0]
       
       pipe_data = rd.gets()&.strip
       next if pipe_data.empty?
       @logger.info("Received on pipe: #{pipe_data}")
 
-      relay_ip,_ = find_relay_ip()
+      relay_ip, device_id = find_relay_ip()
       if !relay_ip
-        puts "unable to find relay board"
+        @logger.error("Unable to locate relay board")
         next
       end
-      @logger.info("Relay board IP: #{relay_ip}")
+      @logger.info("Relay board #{device_id} IP: #{relay_ip}")
       
       # todo socket connect timeout
       @sock = TCPSocket.new(relay_ip, RELAY_BOARD_MODBUS_TCP_PORT) 
-      # todo if socket can't be established
-      # determine what to do based on pipe data
+      # todo if socket can't be established (handled with rescue for now.)
+      
+      
+      # TODO determine what to do based on pipe message
 
-      pulse_relay(RELAY_CH1, 500) # pulse first relay ON for 500 ms
+      #pulse_relay(RELAY_CH1, 250) # pulse first relay ON for 250 ms (upstairs)
+      #pulse_relay(RELAY_CH2, 250) # pulse second relay ON for 250 ms (downstairs)
+      pulse_relay(RELAY_CH3, 250) # pulse second relay ON for 250 ms (downstairs)
       @sock.close
     end
   rescue SystemExit, Interrupt

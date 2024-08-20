@@ -36,9 +36,44 @@ Using the `Edit Device` button allows you to configure the network. Address the 
 
 # Usage
 
-It is recommended to run the modbus_relay program in console mode to make sure it can find the relay board on the network. 
+It is recommended to initially run the modbus_relay program in console mode to make sure it can find the relay board on the network. 
 
-logging to /var/log/modbus_relay.log
+```
+sudo ./modbus_relay console
+I, [2024-08-19T22:39:04.769196 #15199]  INFO -- : Starting Modbus Relay in console mode
+I, [2024-08-19T22:39:04.793252 #15199]  INFO -- : Found relay board 28712E94FF66: 192.168.200.195
+```
+
+Running in console mode, you can type commands which will trigger a relay event. For example, after startup I typed `STDIN Pipe Data` followed by Enter and it caused Relay 3 to pulse for 250ms and the associated bytes sent and received from the relay board.
+
+```
+sudo ./modbus_relay console
+I, [2024-08-19T22:49:52.797950 #16660]  INFO -- : Starting Modbus Relay in console mode
+I, [2024-08-19T22:49:52.826587 #16660]  INFO -- : Found relay board 28712E94FF66: 192.168.200.195
+STDIN Pipe Data
+I, [2024-08-19T22:50:00.583477 #16660]  INFO -- : Received on pipe: STDIN Pipe Data
+I, [2024-08-19T22:50:00.593937 #16660]  INFO -- : Relay board 28712E94FF66 IP: 192.168.200.195
+D, [2024-08-19T22:50:00.595250 #16660] DEBUG -- : Pulsing relay 3 for 250ms.
+D, [2024-08-19T22:50:00.595530 #16660] DEBUG -- : Sending bytes:  0x01 0x05 0x02 0x02 0x00 0x02 0xEC 0x73
+D, [2024-08-19T22:50:00.606018 #16660] DEBUG -- : Received bytes: 0x01 0x05 0x02 0x02 0x00 0x02 0xEC 0x73
+```
+
+Ideally the modbus_relay program will be running as a daemon. Installing modbus_relay as a daemon is accomplished with the following command:  
+```
+sudo modbus_relay install
+```
+
+And started with
+```
+sudo modbus_relay install
+```
+
+or `systemctl start modbus_relay`  
+
+When running in the background as a daemon or service, the log output is located at
+```
+/var/log/modbus_relay.log
+```
 
 # Integration with Home Assistant
 The purpose of interfacing with the WAVESHARE PoE Relay Board was to find a way for my ReoLink doorbell cameras to ring a traditional existing 24VAC doorbell chime system. The chimes include with the Reolink are not really suitable for a larger house and in my opinion are cheap and not very attractive. Not to mention the sound doesn't compare to what you would expect out of a traditional doorbell chime.  
