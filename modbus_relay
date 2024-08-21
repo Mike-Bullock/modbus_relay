@@ -339,13 +339,10 @@ while true # main loop
       end
       @logger.info("Relay board #{device_id} IP: #{relay_ip}")
       
-      # todo socket connect timeout
-      @sock = TCPSocket.new(relay_ip, RELAY_BOARD_MODBUS_TCP_PORT) 
-      # todo if socket can't be established (handled with rescue for now.)
-      
+      @sock = Socket.tcp(relay_ip, RELAY_BOARD_MODBUS_TCP_PORT, connect_timeout: 5)
+      # todo if socket can't be established (handled with rescue for now.)    
       
       # TODO determine what to do based on pipe message
-
       #pulse_relay(RELAY_CH1, 250) # pulse first relay ON for 250 ms (upstairs)
       #pulse_relay(RELAY_CH2, 250) # pulse second relay ON for 250 ms (downstairs)
       pulse_relay(RELAY_CH3, 250) # pulse second relay ON for 250 ms (downstairs)
@@ -355,8 +352,8 @@ while true # main loop
     @logger.info("Exiting")
     break
   rescue => e
-    @logger.error("Exception #{e.message} ")
-    @logger.error("Backtrace:\n#{e.backtrace.join("\n\t")} ")
+    @logger.error("Exception: #{e.message} ")
+    #@logger.error("Backtrace:\n#{e.backtrace.join("\n\t")} ")
     sleep(5) # backoff for 5 seconds while restarting loop. 
   end
 end

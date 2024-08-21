@@ -3,7 +3,7 @@ modbus_relay is a project which controls an ethernet Waveshare Modbus POE ETH Re
 https://www.waveshare.com/modbus-poe-eth-relay.htm
 
 
-modbus_relay listens on a FIFO pipe and when data is received, it will puse Relay 1 for 200 ms. This is used in conjunction with Home Assistant to actuate a 24VAC home doorbell chime.  It is designed to run in either daemon mode (default) or in console. It runs in a non-blocking loop and has 
+modbus_relay listens on a FIFO pipe and when data is received, it will puse Relay 1 for 200 ms. This is used in conjunction with Home Assistant to actuate a 24VAC home doorbell chime.  It is designed to run in either daemon mode (default) or in console. It runs in a non-blocking loop. Any time data is received on the pipe, it will attempt to find a relay board on the network and actuate the relay. 
 
 The program creates and listens on the following FIFO pipe:  
   `/usr/share/hassio/homeassistant/pipes/host_executor_queue`
@@ -13,7 +13,10 @@ When the program is running, you can send commands to the:
 
 # Configuration of the Waveshare Modbus Relay Module
 Device Information: https://www.waveshare.com/modbus-poe-eth-relay.htm  
-Cost is roughly $50 on Amazon.
+Cost is roughly $36 - $50 on Amazon.  
+https://www.amazon.com/Industrial-Modbus-RTU-Relay-Protection/dp/B083J24HCM  
+https://www.amazon.com/waveshare-Ethernet-Communication-Isolation-Protection/dp/B0CDGR7KFZ  
+
 
 The WIKI is a good start to understanding how to manage the relay board device. There is a link to two Windows applications - Vircom and Sscom.
 
@@ -36,7 +39,8 @@ Using the `Edit Device` button allows you to configure the network. Address the 
 
 # Usage
 
-It is recommended to initially run the modbus_relay program in console mode to make sure it can find the relay board on the network. 
+It is recommended to initially run the modbus_relay program in console mode to make sure it can find the relay board on the network.  
+`sudo ./modbus_relay console`
 
 ```
 sudo ./modbus_relay console
@@ -44,7 +48,7 @@ I, [2024-08-19T22:39:04.769196 #15199]  INFO -- : Starting Modbus Relay in conso
 I, [2024-08-19T22:39:04.793252 #15199]  INFO -- : Found relay board 28712E94FF66: 192.168.200.195
 ```
 
-Running in console mode, you can type commands which will trigger a relay event. For example, after startup I typed `STDIN Pipe Data` followed by Enter and it caused Relay 3 to pulse for 250ms and the associated bytes sent and received from the relay board.
+Running in console mode, you can type commands which will trigger a relay event. For example, after startup I typed `STDIN Pipe Data` followed by Enter and it caused Relay 3 to pulse for 250ms and the associated bytes sent and received from the relay board. The current implementation does not 
 
 ```
 sudo ./modbus_relay console
@@ -58,22 +62,16 @@ D, [2024-08-19T22:50:00.595530 #16660] DEBUG -- : Sending bytes:  0x01 0x05 0x02
 D, [2024-08-19T22:50:00.606018 #16660] DEBUG -- : Received bytes: 0x01 0x05 0x02 0x02 0x00 0x02 0xEC 0x73
 ```
 
+From another terminal window, you can send the application messages through echoing data to the pipe path:  
+`echo 123 >  /usr/share/hassio/homeassistant/pipes/host_executor_queue`
+
 Ideally the modbus_relay program will be running as a daemon. Installing modbus_relay as a daemon is accomplished with the following command:  
-```
-sudo modbus_relay install
-```
+`sudo modbus_relay install`
 
-And started with
-```
-sudo modbus_relay install
-```
+And started with:  
+`sudo modbus_relay install`  or `systemctl start modbus_relay`  
 
-or `systemctl start modbus_relay`  
-
-When running in the background as a daemon or service, the log output is located at
-```
-/var/log/modbus_relay.log
-```
+When running in the background as a daemon or service, the log output is located at `/var/log/modbus_relay.log`
 
 # Integration with Home Assistant
 The purpose of interfacing with the WAVESHARE PoE Relay Board was to find a way for my ReoLink doorbell cameras to ring a traditional existing 24VAC doorbell chime system. The chimes include with the Reolink are not really suitable for a larger house and in my opinion are cheap and not very attractive. Not to mention the sound doesn't compare to what you would expect out of a traditional doorbell chime.  
@@ -100,18 +98,23 @@ shell_command:
 
 If you create a pipe on the host with the path:
 	/usr/share/hassio/homeassistant/pipes/host_executor_queue
+
 It is accessible from the HA container with the following path:
 	/config/pipes/host_executor_queue
 
 
-configuration.yaml
+When running modbus_relay on the host operating system, it will trigger toggling a relay whenever data is received on the FIFO pipes. To configure Home Assistant to be able to send to these pipes the `configuration.yaml` file must be edited first to add in the `shell_command` section. This example will send the message `front_door` to the FIFO pipe when the `shell_command.ring_doorbell_front_door` is executed, and will send the message `side_door` to the FIFO pipe when the `shell_command.ring_doorbell_side_door` is executed
+
+configuration.yaml:  
 ```
 shell_command:
   ring_doorbell_front_door: echo front_door > /config/pipes/host_executor_queue
   ring_doorbell_side_door: echo side_door  > /config/pipes/host_executor_queue
 ```
+Home Assistant must be restarted or the configuration file must be reloaded to take effect. 
 
-Automation YAML
+Sample Automation YAML. the important information contained in this automation is the action line:  
+ `action: shell_command.ring_doorbell_front_door`
 ```
 alias: Front Door Ring
 description: ""
@@ -128,3 +131,7 @@ action:
 mode: single
 ```
 
+# Work Remaining
+- Configuration file to specify the IP address or device id of the relay board. Currently the relay board must be on the same layer-2 network as the service (will not cross routers/nat)
+- Command line argument to find all relay boards on the network. 
+- Use the pipe data to specify the relay(s) and pulse time.
