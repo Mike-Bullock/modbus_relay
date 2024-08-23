@@ -3,13 +3,16 @@ modbus_relay is a project which controls an ethernet Waveshare Modbus POE ETH Re
 https://www.waveshare.com/modbus-poe-eth-relay.htm
 
 
-modbus_relay listens on a FIFO pipe and when data is received, it will puse Relay 1 for 200 ms. This is used in conjunction with Home Assistant to actuate a 24VAC home doorbell chime.  It is designed to run in either daemon mode (default) or in console. It runs in a non-blocking loop. Any time data is received on the pipe, it will attempt to find a relay board on the network and actuate the relay. 
+modbus_relay listens on a FIFO pipe and when data is received, it will pulse Relay 1 and 2 simultaneously for 250 ms. This is used in conjunction with Home Assistant to actuate a 24VAC home doorbell chime.  It is designed to run in either daemon mode (default) or in console (good for debugging). Any time data is received on the pipe, it will attempt to find a relay board on the network and actuate the relay. 
 
 The program creates and listens on the following FIFO pipe:  
-  `/usr/share/hassio/homeassistant/pipes/host_executor_queue`
+`/usr/share/hassio/homeassistant/pipes/host_executor_queue`
 
-When the program is running, you can send commands to the:  
-  `echo 123 >  /usr/share/hassio/homeassistant/pipes/host_executor_queue`
+When the program is running, you can send commands with this:  
+`echo 123 >  /usr/share/hassio/homeassistant/pipes/host_executor_queue`
+
+Within Home Assistant, you can send commands to this pipe with the following shell command:  
+`echo 123  > /config/pipes/host_executor_queue`
 
 # Configuration of the Waveshare Modbus Relay Module
 Device Information: https://www.waveshare.com/modbus-poe-eth-relay.htm  
@@ -25,8 +28,9 @@ Vircom is used to find and configure the relay board. The relay board comes with
 
 
 Using the `Edit Device` button allows you to configure the network. Address the device as appropriate for your network (a static IP address is not required for this application). The important parts to configure for this application are:
-- Port: 4196
-- Work Mode: TCP Server
+- Port: 4196  
+- Work Mode: TCP Server  
+
 ![alt text](vircom_device_setings.jpg)
 
 # Installation of modbus_relay prerequisites
@@ -34,8 +38,7 @@ Using the `Edit Device` button allows you to configure the network. Address the 
 `sudo apt install ruby`
 
 - Install ruby gems  
-`sudo gem install daemon fileutil crcthign` # TODO fix this
-
+`sudo gem install daemons fileutils digest-crc logger` 
 
 # Usage
 
@@ -57,7 +60,7 @@ I, [2024-08-19T22:49:52.826587 #16660]  INFO -- : Found relay board 28712E94FF66
 STDIN Pipe Data
 I, [2024-08-19T22:50:00.583477 #16660]  INFO -- : Received on pipe: STDIN Pipe Data
 I, [2024-08-19T22:50:00.593937 #16660]  INFO -- : Relay board 28712E94FF66 IP: 192.168.200.195
-D, [2024-08-19T22:50:00.595250 #16660] DEBUG -- : Pulsing relay 3 for 250ms.
+D, [2024-08-19T22:50:00.595250 #16660] DEBUG -- : Pulsing relay 1 for 250ms.
 D, [2024-08-19T22:50:00.595530 #16660] DEBUG -- : Sending bytes:  0x01 0x05 0x02 0x02 0x00 0x02 0xEC 0x73
 D, [2024-08-19T22:50:00.606018 #16660] DEBUG -- : Received bytes: 0x01 0x05 0x02 0x02 0x00 0x02 0xEC 0x73
 ```
@@ -131,7 +134,9 @@ action:
 mode: single
 ```
 
-# Work Remaining
+# Work Remaining / Other Useful Features / General Rambling
 - Configuration file to specify the IP address or device id of the relay board. Currently the relay board must be on the same layer-2 network as the service (will not cross routers/nat)
 - Command line argument to find all relay boards on the network. 
-- Use the pipe data to specify the relay(s) and pulse time.
+- Use the pipe data to specify the relay(s) and pulse time. For example, sending a command `1,250;2,500` would pulse relay 1 for 250ms and relay 2 for 500 ms. 
+- Since doorbell use can be infrequent (less than a few times a months at my house), a periodic check of the health/reachability of the relay board could be useful, and some sort of notification if the board is not present on the network. 
+- Simplified configuration of the relay board without requiring VirtCom
